@@ -1,0 +1,179 @@
+import arcpy
+import numpy as np
+import csv
+from datetime import datetime
+
+
+arcpy.env.workspace = r"D:\桌面文件\消防站tex\map\cutpoint"
+point_layer = "point.shp"
+
+
+if not arcpy.Exists(point_layer):
+    print "错误：未找到图层！可用图层：", arcpy.ListFeatureClasses()
+    exit()
+
+
+point_data = []
+try:
+    with arcpy.da.SearchCursor(point_layer, ["ID", "POINT_X", "POINT_Y"]) as cursor:
+        for row in cursor:
+            point_id, x, y = row
+            point_data.append((point_id, x, y))
+    point_data.sort(key=lambda x: x[0])
+except Exception as e:
+    print "读取数据失败：", e
+    print "请确认字段名是否正确（如ID、POINT_X、POINT_Y）"
+    exit()
+
+
+point_ids = [p[0] for p in point_data]
+n = len(point_ids)
+distance_matrix = np.zeros((n, n))
+
+
+for i in range(n):
+    for j in range(i + 1, n):  
+        x1, y1 = point_data[i][1], point_data[i][2]
+        x2, y2 = point_data[j][1], point_data[j][2]
+        distance = np.sqrt((x2 - x1)**2 + (y2 - y1)**2)
+        distance_matrix[i, j] = distance
+        distance_matrix[j, i] = distance
+
+a_matrix = distance_matrix / 1250.0  
+b_matrix = distance_matrix / 1000.0   
+
+
+mu_min_matrix = np.zeros((n, n))
+mu_max_matrix = np.zeros((n, n))
+sigma_under_matrix = np.zeros((n, n))
+sigma_bar_matrix = np.zeros((n, n))
+
+
+for i in range(n):
+    for j in range(i + 1, n):
+        a_ij = a_matrix[i, j]  
+        b_ij = b_matrix[i, j]  
+        
+
+        np.random.seed(113)  
+        
+
+        num_groups = 10
+        num_samples = 1000
+        
+
+        group_means_target = np.random.uniform(a_ij, b_ij, num_groups)
+        group_variances_target = np.random.uniform(0.81, 3.2, num_groups)
+        group_stds_target = np.sqrt(group_variances_target)
+        
+
+        data = []
+        for k in range(num_groups):
+            group_data = np.random.normal(group_means_target[k], group_stds_target[k], num_samples)
+            data.append(group_data)
+        
+
+        group_means_actual = np.array([np.mean(group) for group in data])
+        
+         all_data = np.concatenate(data)
+        total_samples = len(all_data)
+        
+
+        new_group_size = 100
+        overlap_size = 0
+        window_step = new_group_size - overlap_size
+        
+
+        new_num_groups = (total_samples - new_group_size) // window_step + 1
+        
+      new_group_variances = []
+        for group_idx in range(new_num_groups):
+            start_idx = group_idx * window_step
+            end_idx = start_idx + new_group_size
+            
+            if end_idx > total_samples:
+                break
+                
+            new_group_data = all_data[start_idx:end_idx]
+            variance = np.var(new_group_data)
+            new_group_variances.append(variance)
+        
+       
+        min_variance = np.min(new_group_variances)
+        max_variance = np.max(new_group_variances)
+        
+        
+        mu_min = np.min(group_means_actual)
+        mu_max = np.max(group_means_actual)
+        mu_min_matrix[i, j] = mu_min
+        mu_max_matrix[i, j] = mu_max
+        sigma_under_matrix[i, j] = min_variance
+        sigma_bar_matrix[i, j] = max_variance
+
+
+for i in range(n):
+    for j in range(i):
+        mu_min_matrix[i, j] = mu_min_matrix[j, i]
+        mu_max_matrix[i, j] = mu_max_matrix[j, i]
+        sigma_under_matrix[i, j] = sigma_under_matrix[j, i]
+        sigma_bar_matrix[i, j] = sigma_bar_matrix[j, i]
+
+
+for i in range(n):
+    mu_min_matrix[i, i] = 0.0
+    mu_max_matrix[i, i] = 0.0
+    sigma_under_matrix[i, i] = 0.0
+    sigma_bar_matrix[i, i] = 0.0
+
+
+def format_interval(val1, val2):
+    return "[%.4f, %.4f]" % (val1, val2)
+
+
+interval_a_b = [[format_interval(a_matrix[i][j], b_matrix[i][j]) for j in range(n)] for i in range(n)]
+interval_mu = [[format_interval(mu_min_matrix[i][j], mu_max_matrix[i][j]) for j in range(n)] for i in range(n)]
+interval_sigma = [[format_interval(sigma_under_matrix[i][j], sigma_bar_matrix[i][j]) for j in range(n)] for i in range(n)]
+
+
+def export_to_csv(matrix, filename, title):
+    try:
+        with open(filename, "wb") as f:
+            writer = csv.writer(f)
+            header = [""] + ["i=%d" % (idx + 1) for idx in range(n)]
+            writer.writerow(header)
+            for idx in range(n):
+                writer.writerow(["j=%d" % (idx + 1)] + matrix[idx])
+        print "已导出 %s 至：%s" % (title, filename)
+    except Exception as e:
+        print "导出失败：", e
+
+
+timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+prefix = "matrix_full"
+
+
+export_to_csv(
+    [[("%.4f" % val) for val in row] for row in distance_matrix],
+    r"G:\map\cut\%s_distance_matrix_%s.csv" % (prefix, timestamp),
+    "Distance Matrix"
+)
+
+export_to_csv(
+    interval_a_b,
+    r"G:\map\cut\%s_interval_a_b_%s.csv" % (prefix, timestamp),
+    "Interval Matrix [a_ij, b_ij]"
+)
+
+export_to_csv(
+    interval_mu,
+    r"G:\map\cut\%s_mean_interval_%s.csv" % (prefix, timestamp),
+    "Mean Interval Matrix [μ̲, μ̅]"
+)
+
+export_to_csv(
+    interval_sigma,
+    r"G:\map\cut\%s_variance_interval_%s.csv" % (prefix, timestamp),
+    "Variance Interval Matrix [σ̲², σ̅²]"
+)
+
+print "\n所有结果已保存 文件夹"
